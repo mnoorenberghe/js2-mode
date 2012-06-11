@@ -675,8 +675,9 @@ which doesn't seem particularly useful, but Rhino permits it."
 
 (defvar js2-COMMENT 160)
 (defvar js2-ENUM 161)  ; for "enum" reserved word
+(defvar js2-OF 162)       ; for harmony iterators
 
-(defconst js2-num-tokens (1+ js2-ENUM))
+(defconst js2-num-tokens (1+ js2-OF))
 
 (defconst js2-debug-print-trees nil)
 
@@ -1634,7 +1635,7 @@ the correct number of ARGS must be provided."
          "missing ; after for-loop condition")
 
 (js2-msg "msg.in.after.for.name"
-         "missing in after for")
+         "missing in or of after for")
 
 (js2-msg "msg.no.paren.for.ctrl"
          "missing ) after for-loop control")
@@ -2560,6 +2561,7 @@ NAME can be a lisp symbol or string.  SYMBOL is a `js2-symbol'."
                                                      in-pos
                                                      each-pos
                                                      foreach-p
+                                                     forof-p
                                                      lp
                                                      rp)))
   "AST node for a for..in loop."
@@ -2567,7 +2569,8 @@ NAME can be a lisp symbol or string.  SYMBOL is a `js2-symbol'."
   object    ; object over which we're iterating
   in-pos    ; buffer position of 'in' keyword
   each-pos  ; buffer position of 'each' keyword, if foreach-p
-  foreach-p) ; t if it's a for-each loop
+  foreach-p ; t if it's a for-each loop
+  forof-p)  ; t if it's a for-of loop
 
 (put 'cl-struct-js2-for-in-node 'js2-visitor 'js2-visit-for-in-node)
 (put 'cl-struct-js2-for-in-node 'js2-printer 'js2-print-for-in-node)
@@ -2579,13 +2582,16 @@ NAME can be a lisp symbol or string.  SYMBOL is a `js2-symbol'."
 
 (defun js2-print-for-in-node (n i)
   (let ((pad (js2-make-pad i))
-        (foreach (js2-for-in-node-foreach-p n)))
+        (foreach (js2-for-in-node-foreach-p n))
+        (forof (js2-for-in-node-forof-p n)))
     (insert pad "for ")
     (if foreach
         (insert "each "))
     (insert "(")
     (js2-print-ast (js2-for-in-node-iterator n) 0)
-    (insert " in ")
+    (if forof
+        (insert " of ")
+      (insert " in "))
     (js2-print-ast (js2-for-in-node-object n) 0)
     (insert ") {\n")
     (js2-print-body (js2-for-in-node-body n) (1+ i))
@@ -3216,6 +3222,7 @@ The type field inherited from `js2-node' holds the operator."
   (let ((table (make-hash-table :test 'eq))
         (tokens
          (list (cons js2-IN "in")
+               (cons js2-OF "of")
                (cons js2-TYPEOF "typeof")
                (cons js2-INSTANCEOF "instanceof")
                (cons js2-DELPROP "delete")
@@ -3791,6 +3798,7 @@ as opposed to required parens such as those enclosing an if-conditional."
                                                               in-pos
                                                               foreach-p
                                                               each-pos
+                                                              forof-p
                                                               lp
                                                               rp)))
   "AST subtree for each 'for (foo in bar)' loop in an array comprehension.")
@@ -5421,7 +5429,7 @@ into temp buffers."
                js2-DEBUGGER js2-DEFAULT js2-DELPROP js2-DO
                js2-ELSE
                js2-FALSE js2-FINALLY js2-FOR js2-FUNCTION
-               js2-IF js2-IN js2-INSTANCEOF js2-IMPORT
+               js2-IF js2-IN js2-OF js2-INSTANCEOF js2-IMPORT
                js2-LET
                js2-NEW js2-NULL
                js2-RETURN
@@ -7899,6 +7907,7 @@ Parses for, for-in, and for each-in statements."
         pn
         is-for-each
         is-for-in
+        is-for-of
         in-pos
         each-pos
         tmp-pos
@@ -7910,8 +7919,10 @@ Parses for, for-in, and for each-in statements."
         lp
         rp)
     (js2-consume-token)
+    (message "js2-parse-for")
     ;; See if this is a for each () instead of just a for ()
     (when (js2-match-token js2-NAME)
+      (message "%s" js2-ts-string)
       (if (string= "each" js2-ts-string)
           (progn
             (setq is-for-each t
@@ -7934,13 +7945,23 @@ Parses for, for-in, and for each-in statements."
             (setq init (js2-parse-variables tt js2-token-beg)))
            (t
             (setq init (js2-parse-expr)))))
-      (if (js2-match-token js2-IN)
-          (setq is-for-in t
-                in-pos (- js2-token-beg for-pos)
-                ;; scope of iteration target object is not the scope we've created above.
-                ;; stash current scope temporary.
-                cond (let ((js2-current-scope (js2-scope-parent-scope js2-current-scope)))
-                       (js2-parse-expr)))  ; object over which we're iterating
+      (if (= (js2-peek-token) js2-IN)
+          (message "Is In"))
+      (if (= (js2-peek-token) js2-OF)
+          (message "Is Of"))
+      (if (js2-match-token js2-OF)
+          (message "Is Of2"))
+      (if (or (js2-match-token js2-IN)
+              (js2-match-token js2-OF))
+          (progn
+            (message "Is for in or if")
+            (setq is-for-in t
+                  in-pos (- js2-token-beg for-pos)
+                  is-for-of (= tt js2-OF)
+                  ;; scope of iteration target object is not the scope we've created above.
+                  ;; stash current scope temporary.
+                  cond (let ((js2-current-scope (js2-scope-parent-scope js2-current-scope)))
+                         (js2-parse-expr))))  ; object over which we're iterating
         ;; else ordinary for loop - parse cond and incr
         (js2-must-match js2-SEMI "msg.no.semi.for")
         (setq cond (if (= (js2-peek-token) js2-SEMI)
@@ -7972,6 +7993,7 @@ Parses for, for-in, and for each-in statements."
                                        :in-pos in-pos
                                        :foreach-p is-for-each
                                        :each-pos each-pos
+                                       :forof-p is-for-of
                                        :lp lp
                                        :rp rp)))
       (unwind-protect
@@ -8754,7 +8776,7 @@ or a `js2-node' struct if it has already been parsed."
     pn))
 
 (defconst js2-parse-rel-ops
-  (list js2-IN js2-INSTANCEOF js2-LE js2-LT js2-GE js2-GT))
+  (list js2-IN js2-OF js2-INSTANCEOF js2-LE js2-LT js2-GE js2-GT))
 
 (defun js2-parse-rel-expr ()
   (let ((pn (js2-parse-shift-expr))
@@ -8763,7 +8785,7 @@ or a `js2-node' struct if it has already been parsed."
     (while continue
       (setq tt (js2-peek-token))
       (cond
-       ((and js2-in-for-init (= tt js2-IN))
+       ((and js2-in-for-init (or (= tt js2-IN) (= tt js2-OF)))
         (setq continue nil))
        ((memq tt js2-parse-rel-ops)
         (js2-consume-token)
@@ -9529,8 +9551,9 @@ Last token peeked should be the initial FOR."
           ;; be restricted to the array comprehension
           (if (js2-name-node-p iter)
               (js2-define-symbol js2-LET (js2-name-node-name iter) pn t))
-          (if (js2-must-match js2-IN "msg.in.after.for.name")
-              (setq in-pos (- js2-token-beg pos)))
+          (if (or (js2-match-token js2-IN) (js2-match-token js2-OF))
+              (setq in-pos (- js2-token-beg pos))
+            (js2-report-error "msg.in.after.for.name"))
           (setq obj (js2-parse-expr))
           (if (js2-must-match js2-RP "msg.no.paren.for.ctrl")
               (setq rp (- js2-token-beg pos)))
@@ -9745,7 +9768,7 @@ followed by an opening brace.")
 
 (defconst js2-indent-operator-re
   (concat "[-+*/%<>=&^|?:.]\\([^-+*/]\\|$\\)\\|"
-          (regexp-opt '("in" "instanceof") 'words))
+          (regexp-opt '("in" "instanceof" "of") 'words))
   "Regular expression matching operators that affect indentation
 of continued expressions.")
 
